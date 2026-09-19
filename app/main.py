@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from . import db
+from .proportion import ProportionError, check_proportions
 from .recheck import build_recheck
 from .report import render_html_report, render_markdown_report
 from .review import analyze
@@ -71,6 +72,10 @@ class SupplierRiskPreview(BaseModel):
     text: str
     plans_text: str = ""
     declared: List[str] = Field(default_factory=list)
+
+
+class ProportionCheck(BaseModel):
+    text: str
 
 
 # ---------- 页面 ----------
@@ -133,6 +138,27 @@ def supplier_risk_preview(payload: SupplierRiskPreview):
             declared=declared)
     except SupplierPlanError as exc:
         raise HTTPException(400, str(exc))
+
+
+# ---------- 配料占比区间顺序校验（临时预览） ----------
+
+@app.post("/api/proportion-check")
+def proportion_check(payload: ProportionCheck):
+    """配料占比区间顺序校验。
+
+    每个原料名后须标注占比区间（[最小值-最大值%]，单值写 [数值%]）；
+    对每组同级配料按标签顺序建立占比非递增约束，用区间传播判断整组
+    是否存在可行赋值：可行时返回每项收紧后的可行区间（含只能取单一
+    边界值的项），不可行时返回最短冲突片段及完整嵌套路径。
+    纯计算预览，不读取字典、不写入历史记录。
+    """
+    if not payload.text.strip():
+        raise HTTPException(400, "配方文本不能为空")
+    try:
+        return check_proportions(payload.text)
+    except ProportionError as exc:
+        # detail 为逐条错误列表：[{"path": [...], "message": "..."}]
+        raise HTTPException(400, detail=exc.errors)
 
 
 # ---------- 审查 ----------

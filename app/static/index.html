@@ -95,12 +95,17 @@
   .tag-plan { font-size: 12px; margin-left: 6px; color: #92600a; }
   .src-leaf.potential { color: var(--orange); }
   .legend { font-size: 12.5px; color: #555; line-height: 2; margin: 4px 0; }
+  /* 配料占比区间顺序校验 */
+  .badge.pin { background: #dbeafe; color: #1d4ed8; font-weight: 600; }
+  tr.conflict-row td { background: #fef2f2; }
+  .conflict-box { border: 1px solid #fca5a5; background: #fef2f2; border-radius: 8px;
+                  padding: 8px 14px; margin: 8px 0; font-size: 13.5px; color: var(--red); }
 </style>
 </head>
 <body>
 <header>
   <h1>🥜 食品过敏原标签审查台</h1>
-  <p>解析嵌套子配料配方 · 传播汇总过敏原 · 核对标签遗漏/多报 · 配方版本对比 · 导出审查报告</p>
+  <p>解析嵌套子配料配方 · 传播汇总过敏原 · 核对标签遗漏/多报 · 配方版本对比 · 占比顺序校验 · 导出审查报告</p>
 </header>
 <main>
 
@@ -174,8 +179,27 @@
   <div id="risk-result"></div>
 </section>
 
+<section>
+  <h2>④ 配料占比区间顺序校验 <span class="pill gray">临时预览</span></h2>
+  <p class="hint">在每个原料名后标注占比区间 <code>[最小值-最大值%]</code>（单值写 <code>[12%]</code>，
+    中英文方括号均可）。系统对每组同级配料按标签顺序建立<b>占比非递增</b>约束，
+    用<b>区间传播</b>（而非组合枚举）判断整组是否存在可行赋值：可行时给出每项
+    <b>收紧后的可行区间</b>，并标出只能取单一边界值的项；不可行时给出<b>最短冲突片段</b>
+    及完整嵌套路径。缺少区间、格式错误、负值或下界大于上界时会逐条定位。
+    本预览<b>不会</b>写入历史记录。</p>
+  <label>配方文本（每个原料名后必须跟占比区间，括号表示子配料）</label>
+  <textarea id="prop-text" rows="4"
+    placeholder="配料表：小麦粉[30-40%]，白砂糖[25-35%]，巧克力酱[10-18%]（可可脂[40-60%]，奶粉[30-50%]），鸡蛋[5-10%]"></textarea>
+  <div class="toolbar">
+    <button onclick="submitProportion()">校验占比顺序</button>
+    <button class="ghost" onclick="fillPropDemo()">填充占比示例</button>
+    <span id="prop-msg" class="error"></span>
+  </div>
+  <div id="prop-result"></div>
+</section>
+
 <section id="result-section" class="hidden">
-  <h2>④ 审查结果 <span id="result-title" class="hint"></span></h2>
+  <h2>⑤ 审查结果 <span id="result-title" class="hint"></span></h2>
   <div id="recheck-bar"></div>
   <div id="recheck-panel" class="recheck-panel hidden"></div>
   <div id="result-body"></div>
@@ -186,7 +210,7 @@
 </section>
 
 <section>
-  <h2>⑤ 历史审查记录</h2>
+  <h2>⑥ 历史审查记录</h2>
   <div id="history-table"><p class="hint">暂无记录</p></div>
 </section>
 
@@ -694,6 +718,91 @@ async function fillRiskDemo() {
   $('risk-plans').value = "乳清粉：乳；无\n奶粉：无\n乳糖：无\n可可脂：无；坚果";
   $('risk-declared').value = "麸质谷物，蛋类，坚果，鱼";
   $('risk-msg').textContent = '示例已填充：乳为潜在遗漏，大豆为确定遗漏（沿用字典），坚果为潜在多报，鱼为确定多报';
+}
+
+/* ---------- 配料占比区间顺序校验（临时预览） ---------- */
+const intervalText = iv => iv[0] === iv[1] ? `[${iv[0]}%]` : `[${iv[0]}-${iv[1]}%]`;
+
+async function submitProportion() {
+  $('prop-msg').textContent = '';
+  $('prop-result').innerHTML = '';
+  let data;
+  try {
+    const res = await fetch('/api/proportion-check', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: $('prop-text').value})});
+    data = await res.json();
+    if (!res.ok) {
+      // 输入标注错误：detail 为逐条 {path, message} 列表
+      if (Array.isArray(data.detail)) { renderPropErrors(data.detail); return; }
+      throw new Error(data.detail || res.statusText);
+    }
+  } catch (e) { $('prop-msg').textContent = e.message; return; }
+  renderPropResult(data);
+}
+
+function renderPropErrors(errors) {
+  $('prop-result').innerHTML = `<div class="result-block">
+    <h3>占比区间标注需修正（${errors.length} 处）<span class="pill red">未校验</span></h3>
+    <ul class="src-paths">${errors.map(e =>
+      `<li>${pathLine(e.path)}<span class="src-arrow">：</span><span class="error">${esc(e.message)}</span></li>`
+    ).join('')}</ul></div>`;
+}
+
+function propGroupTitle(path) {
+  return path.length
+    ? `「${path.map(esc).join(' › ')}」的子配料组`
+    : '顶层配料组';
+}
+
+function propGroupHtml(g) {
+  const state = g.feasible
+    ? '<span class="pill green">可行</span>'
+    : '<span class="pill red">不可行</span>';
+  let conflictBox = '';
+  if (g.conflict) {
+    const seg = g.conflict.items.map(it =>
+      `<b>${esc(it.name)}</b><code>${intervalText(it.interval)}</code>`).join(' ≥ ');
+    conflictBox = `<div class="conflict-box">✖ <b>最短冲突片段</b>
+      （本组第 ${g.conflict.start + 1}–${g.conflict.end + 1} 项）：${seg}<br>
+      原因：${esc(g.conflict.reason)}</div>`;
+  }
+  const rows = g.items.map((it, i) => {
+    const inConflict = g.conflict && i >= g.conflict.start && i <= g.conflict.end;
+    const tightened = it.tightened
+      ? `<code>${intervalText(it.tightened)}</code>` : '<span class="hint">—</span>';
+    const note = it.pinned
+      ? `<span class="badge pin" title="区间传播后该项只能取此单一边界值">仅可取 ${it.tightened[0]}%</span>` : '';
+    return `<tr${inConflict ? ' class="conflict-row"' : ''}>
+      <td>${i + 1}</td><td><b>${esc(it.name)}</b></td>
+      <td><code>${intervalText(it.interval)}</code></td>
+      <td>${tightened}</td><td>${note}</td></tr>`;
+  }).join('');
+  return `<div class="result-block"><h3>${propGroupTitle(g.path)} ${state}</h3>
+    ${conflictBox}
+    <table><tr><th style="width:3.5em">顺序</th><th>配料</th>
+      <th style="width:9em">标注区间</th><th style="width:10em">收紧后可行区间</th>
+      <th style="width:9em">边界标记</th></tr>${rows}</table></div>`;
+}
+
+function renderPropResult(r) {
+  const pill = r.feasible
+    ? '<span class="pill green">全部配料组可行</span>'
+    : '<span class="pill red">存在不可行配料组</span>';
+  let html = `<div class="result-block"><h3>占比顺序校验结论 ${pill}</h3>
+    <p class="legend">对每组同级配料按标签顺序建立占比非递增约束（前项 ≥ 后项），
+      区间传播判断可行性；<span class="badge pin">仅可取 X%</span> 表示该项被收紧为单一边界值。</p></div>`;
+  html += r.group_count
+    ? r.groups.map(propGroupHtml).join('')
+    : '<p class="hint">未解析到配料。</p>';
+  $('prop-result').innerHTML = html;
+}
+
+function fillPropDemo() {
+  // 顶层「巧克力酱[10-18%] ≥ 鸡蛋[20-25%]」不可满足 -> 最短冲突片段；
+  // 奶粉子组中乳清粉[50-60%]、乳糖[60-75%] 被区间传播收紧为仅可取 60%。
+  $('prop-text').value = "配料表：小麦粉[30-40%]，白砂糖[25-35%]，巧克力酱[10-18%]（可可脂[40-60%]，奶粉[30-50%]（乳清粉[50-60%]，乳糖[60-75%]），大豆卵磷脂[5-10%]），鸡蛋[20-25%]，食盐[1-2%]";
+  $('prop-msg').textContent = '示例已填充：顶层「巧克力酱 vs 鸡蛋」冲突不可行；奶粉子组中乳清粉、乳糖将被收紧为仅可取 60%';
 }
 
 /* ---------- 示例 ---------- */
