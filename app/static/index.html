@@ -174,8 +174,28 @@
   <div id="risk-result"></div>
 </section>
 
+<section>
+  <h2>④ 配料占比区间顺序校验 <span class="pill gray">临时预览</span></h2>
+  <p class="hint">在每个原料名后标注占比区间：<code>奶粉[8-12%]</code>，单值写
+    <code>食盐[2%]</code>；父配料先标注再跟子配料括号，如
+    <code>巧克力酱[25-60%]（可可脂[10-18%]）</code>。按标签书写顺序校验每组同级配料的
+    <b>占比非递增</b>约束：后端用区间传播（前向收紧上界、后向收紧下界）判断整组可行性，
+    可行时给出每项收紧后的精确可行区间并标出只能取单一边界值的项；不可行时给出
+    最短冲突片段及完整嵌套路径。缺少区间、格式错误、负值、下界大于上界都会定位到
+    具体路径。本预览<b>不会</b>写入审查历史。</p>
+  <label>配方文本（每个原料名后必须带占比区间标注）</label>
+  <textarea id="prop-text" rows="4"
+    placeholder="配料表：小麦粉[40-55%]，巧克力酱[25-60%]（可可脂[10-18%]，奶粉[12-15%]），鸡蛋[5-20%]，食盐[20-30%]"></textarea>
+  <div class="toolbar">
+    <button onclick="submitProportionCheck()">校验占比顺序</button>
+    <button class="ghost" onclick="fillProportionDemo()">填充占比示例</button>
+    <span id="prop-msg" class="error"></span>
+  </div>
+  <div id="prop-result"></div>
+</section>
+
 <section id="result-section" class="hidden">
-  <h2>④ 审查结果 <span id="result-title" class="hint"></span></h2>
+  <h2>⑤ 审查结果 <span id="result-title" class="hint"></span></h2>
   <div id="recheck-bar"></div>
   <div id="recheck-panel" class="recheck-panel hidden"></div>
   <div id="result-body"></div>
@@ -186,7 +206,7 @@
 </section>
 
 <section>
-  <h2>⑤ 历史审查记录</h2>
+  <h2>⑥ 历史审查记录</h2>
   <div id="history-table"><p class="hint">暂无记录</p></div>
 </section>
 
@@ -694,6 +714,100 @@ async function fillRiskDemo() {
   $('risk-plans').value = "乳清粉：乳；无\n奶粉：无\n乳糖：无\n可可脂：无；坚果";
   $('risk-declared').value = "麸质谷物，蛋类，坚果，鱼";
   $('risk-msg').textContent = '示例已填充：乳为潜在遗漏，大豆为确定遗漏（沿用字典），坚果为潜在多报，鱼为确定多报';
+}
+
+/* ---------- 配料占比区间顺序校验（临时预览） ---------- */
+const fmtPct = v => String(v);
+
+function annText(lo, hi) {
+  return lo === hi ? `${fmtPct(lo)}%` : `${fmtPct(lo)}-${fmtPct(hi)}%`;
+}
+
+function propGroupTitle(path) {
+  return path.length ? path.map(esc).join(' › ') + ' 的子配料' : '顶层配料';
+}
+
+async function submitProportionCheck() {
+  $('prop-msg').textContent = '';
+  try {
+    const r = await post('/api/proportion-check-preview', {text: $('prop-text').value});
+    renderProportionResult(r);
+  } catch (e) {
+    $('prop-result').innerHTML = '';
+    $('prop-msg').textContent = e.message;
+  }
+}
+
+function proportionErrorsHtml(errors) {
+  const rows = errors.map(e => `<tr>
+    <td>${e.path.length ? e.path.map(esc).join(' › ') : '（配方整体）'}</td>
+    <td><span class="error">${esc(e.message)}</span></td></tr>`).join('');
+  return `<div class="result-block"><h3>占比标注有误
+      <span class="pill red">${errors.length} 处</span></h3>
+    <table><tr><th style="width:42%">嵌套路径</th><th>问题</th></tr>${rows}</table>
+    <p class="hint">修正全部标注问题后重新校验。</p></div>`;
+}
+
+function proportionConflictsHtml(conflicts) {
+  const blocks = conflicts.map(c => {
+    const fragment = c.fragment.map(f =>
+      `<span class="badge miss">${esc(f.name)}[${annText(f.lo, f.hi)}]</span>`
+    ).join('<span class="src-arrow"> ≥ </span>');
+    return `<div class="recheck-bar" style="border-color:#fca5a5;background:#fef2f2">
+      <b>同级组：</b>${propGroupTitle(c.path)}<br>
+      <b>最短冲突片段：</b>${fragment}
+      <div class="error" style="margin-top:4px">${esc(c.message)}</div>
+    </div>`;
+  }).join('');
+  return `<div class="result-block"><h3>占比顺序不可行
+      <span class="pill red">${conflicts.length} 组冲突</span></h3>
+    <p class="hint">按标签顺序同级占比须非递增；下列每组的最短冲突片段即无法满足该约束的最小连续片段。</p>
+    ${blocks}</div>`;
+}
+
+function proportionGroupsHtml(groups) {
+  return groups.map(g => {
+    const rows = g.items.map((it, i) => {
+      const tightened = it.original[0] !== it.tightened[0] ||
+                        it.original[1] !== it.tightened[1];
+      const range = it.pinned
+        ? `<b>${fmtPct(it.tightened[0])}%</b>`
+        : `${fmtPct(it.tightened[0])}% ~ ${fmtPct(it.tightened[1])}%`;
+      return `<tr><td>${i + 1}</td>
+        <td>${esc(it.name)}${it.pinned
+          ? ' <span class="pill orange" title="该原料占比被约束锁定，只能取此单一边界值">锁定单值</span>'
+          : ''}</td>
+        <td>${annText(it.original[0], it.original[1])}</td>
+        <td>${range}${tightened ? ' <span class="hint">（已收紧）</span>' : ''}</td></tr>`;
+    }).join('');
+    return `<h4 style="margin:12px 0 4px">${propGroupTitle(g.path)}</h4>
+      <table><tr><th style="width:3em">顺序</th><th>原料</th>
+      <th>标注区间</th><th>收紧后可行区间</th></tr>${rows}</table>`;
+  }).join('');
+}
+
+function renderProportionResult(r) {
+  let html;
+  if (r.status === 'error') {
+    html = proportionErrorsHtml(r.errors);
+  } else if (r.status === 'infeasible') {
+    html = proportionConflictsHtml(r.conflicts);
+  } else {
+    html = `<div class="result-block"><h3>占比顺序可行
+        <span class="pill green">${r.group_count} 组全部通过</span></h3>
+      <p class="legend">区间传播（前向收紧上界、后向收紧下界）后的精确可行区间；
+        <span class="pill orange">锁定单值</span> 表示只能取该单一边界值。</p>
+      ${proportionGroupsHtml(r.groups)}</div>`;
+  }
+  $('prop-result').innerHTML = html;
+}
+
+function fillProportionDemo() {
+  // 巧克力酱上界被小麦粉收紧（60→55），鸡蛋与食盐互相锁定为 20%，
+  // 可可脂下界被奶粉收紧（10→12）
+  $('prop-text').value = '配料表：小麦粉[40-55%]，巧克力酱[25-60%]（可可脂[10-18%]，奶粉[12-15%]），鸡蛋[5-20%]，食盐[20-30%]';
+  $('prop-msg').textContent = '示例已填充，点击「校验占比顺序」查看区间收紧与单值锁定';
+  $('prop-result').innerHTML = '';
 }
 
 /* ---------- 示例 ---------- */

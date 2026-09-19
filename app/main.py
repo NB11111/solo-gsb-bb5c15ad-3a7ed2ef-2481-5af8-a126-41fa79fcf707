@@ -5,7 +5,8 @@
 - 解析带嵌套子配料的配方文本，传播并汇总过敏原；
 - 对照标签声明，指出遗漏 / 多报的过敏原；
 - 支持两版配方对比，输出过敏原变化；
-- 生成并导出标签审查报告（HTML / Markdown）。
+- 生成并导出标签审查报告（HTML / Markdown）；
+- 临时预览工具：供应商方案风险区间、配料占比区间顺序校验（只读，不写历史）。
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 
 from . import db
+from .proportion import analyze_proportions
 from .recheck import build_recheck
 from .report import render_html_report, render_markdown_report
 from .review import analyze
@@ -71,6 +73,10 @@ class SupplierRiskPreview(BaseModel):
     text: str
     plans_text: str = ""
     declared: List[str] = Field(default_factory=list)
+
+
+class ProportionPreview(BaseModel):
+    text: str
 
 
 # ---------- 页面 ----------
@@ -133,6 +139,24 @@ def supplier_risk_preview(payload: SupplierRiskPreview):
             declared=declared)
     except SupplierPlanError as exc:
         raise HTTPException(400, str(exc))
+
+
+# ---------- 配料占比区间顺序校验（临时预览） ----------
+
+@app.post("/api/proportion-check-preview")
+def proportion_check_preview(payload: ProportionPreview):
+    """配料占比区间顺序校验（临时预览）。
+
+    复用嵌套配方解析，在每个原料名后读取 ``[最小-最大%]`` / ``[值%]``
+    占比标注，对每组同级配料按标签顺序建立占比非递增约束，用区间传播
+    （前向收紧上界、后向收紧下界）判断整组可行性：可行时返回每项收紧后
+    的精确可行区间并标出单值锁定项，不可行时返回最短冲突片段及完整嵌套
+    路径；标注问题（缺少区间 / 格式错误 / 负值 / 下界大于上界）逐条定位
+    到具体路径。只读计算，不写入审查历史。
+    """
+    if not payload.text.strip():
+        raise HTTPException(400, "配方文本不能为空")
+    return analyze_proportions(payload.text)
 
 
 # ---------- 审查 ----------

@@ -173,4 +173,35 @@ db.update_review_result(old_rid, legacy_outcome["new_result"],
 assert db.get_review(old_rid)["needs_recheck"] is False
 print("6. 字典时效复核（指纹/误报防护/前后差异/确认覆盖/旧记录） OK")
 
+# 7. 配料占比区间顺序校验（临时预览，不写历史）
+from app.proportion import analyze_proportions
+
+# 7a. 可行：前向/后向区间传播收紧，鸡蛋与食盐互相锁定为 20%
+prop = analyze_proportions(
+    "配料表：小麦粉[40-55%]，巧克力酱[25-60%]（可可脂[10-18%]，奶粉[12-15%]），"
+    "鸡蛋[5-20%]，食盐[20-30%]")
+assert prop["status"] == "feasible" and prop["group_count"] == 2, prop
+top = next(g for g in prop["groups"] if g["path"] == [])["items"]
+assert top[1]["tightened"] == [25.0, 55.0]          # 上界被小麦粉收紧
+assert top[2]["tightened"] == [20.0, 20.0] and top[2]["pinned"]
+assert top[3]["tightened"] == [20.0, 20.0] and top[3]["pinned"]
+child = next(g for g in prop["groups"] if g["path"] == ["巧克力酱"])["items"]
+assert child[0]["tightened"] == [12.0, 18.0]        # 下界被奶粉收紧
+
+# 7b. 不可行：返回最短冲突片段及完整嵌套路径
+prop = analyze_proportions(
+    "小麦粉[40-55%]，巧克力酱[25-35%]（可可脂[5-8%]，奶粉[12-15%]）")
+assert prop["status"] == "infeasible", prop
+[prop_conflict] = prop["conflicts"]
+assert prop_conflict["path"] == ["巧克力酱"]
+assert [f["name"] for f in prop_conflict["fragment"]] == ["可可脂", "奶粉"]
+
+# 7c. 标注问题定位到具体路径，且全程不产生审查记录
+prop = analyze_proportions("巧克力酱[25-60%]（可可脂，奶粉[12-15%]），鸡蛋")
+assert prop["status"] == "error"
+assert {tuple(e["path"]) for e in prop["errors"]} == {
+    ("巧克力酱", "可可脂"), ("鸡蛋",)}
+assert len(db.list_reviews()) == 2  # 仍只有第 5 步创建的两条
+print("7. 配料占比区间顺序校验（收紧/锁定/最短冲突片段/路径定位/只读） OK")
+
 print("\n全部集成冒烟测试通过 ✔")
